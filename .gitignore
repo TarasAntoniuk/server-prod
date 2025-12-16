@@ -1,0 +1,30 @@
+# Environment variables
+.env
+
+# SSL certificates (managed by Certbot)
+certs/
+webroot/
+
+# Logs
+logs/
+
+# PostgreSQL data
+postgres/data/
+
+# Backup files
+backups/
+*.backup
+*.sql.gz
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.swp
+*~

@@ -1,0 +1,178 @@
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Deploy to server
+      uses: appleboy/scp-action@master
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SSH_KEY }}
+        source: "docker-compose.yml,nginx/,postgres/"
+        target: "/srv/infrastructure"
+        strip_components: 0
+        rm: false
+    
+    - name: Set permissions and start services
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SSH_KEY }}
+        script: |
+          cd /srv/infrastructure
+          
+          # Set executable permission
+          chmod +x postgres/init-db.sh
+          
+          # Check if .env exists
+          if [ ! -f .env ]; then
+            echo "❌ ERROR: .env file not found!"
+            echo "Please create .env on server manually"
+            exit 1
+          fi
+          
+          # Pull latest images
+          docker-compose pull
+          
+          # Start services
+          docker-compose up -d
+          
+          # Wait for services to stabilize
+          echo "⏳ Waiting for services to start..."
+          sleep 15
+
+    - name: Verify deployment
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SSH_KEY }}
+        script: |
+          cd /srv/infrastructure
+          
+          echo "========================================"
+          echo "🔍 Infrastructure Health Check"
+          echo "========================================"
+          echo ""
+          
+          # Check all containers are running
+          echo "📦 Container Status:"
+          docker-compose ps
+          echo ""
+          
+          # Count running containers
+          RUNNING=$(docker-compose ps | grep "Up" | wc -l)
+          EXPECTED=3
+          
+          if [ $RUNNING -ne $EXPECTED ]; then
+            echo "❌ Expected $EXPECTED containers running, but found $RUNNING"
+            exit 1
+          fi
+          echo "✅ All $RUNNING containers are running"
+          echo ""
+          
+          # Test PostgreSQL
+          echo "🗄️  PostgreSQL Health:"
+          if docker exec shared-postgres pg_isready -U postgres > /dev/null 2>&1; then
+            echo "✅ PostgreSQL is ready"
+            
+            # Check databases exist
+            echo ""
+            echo "📊 Databases:"
+            docker exec shared-postgres psql -U postgres -c "\l" | grep -E "finance|time_tracking" || echo "⚠️  Warning: Expected databases not found"
+          else
+            echo "❌ PostgreSQL is not ready"
+            exit 1
+          fi
+          echo ""
+          
+          # Test Nginx configuration
+          echo "🌐 Nginx Health:"
+          if docker exec shared-nginx nginx -t > /dev/null 2>&1; then
+            echo "✅ Nginx configuration is valid"
+          else
+            echo "❌ Nginx configuration has errors"
+            docker exec shared-nginx nginx -t
+            exit 1
+          fi
+          echo ""
+          
+          # Check Nginx is responding
+          echo "🔌 Nginx Response:"
+          if docker exec shared-nginx wget --spider --quiet http://localhost:80 2>&1; then
+            echo "✅ Nginx is responding on port 80"
+          else
+            echo "⚠️  Nginx not responding on port 80 (might be expected during migration)"
+          fi
+          echo ""
+          
+          # Check Docker network
+          echo "🌐 Docker Network:"
+          if docker network inspect app-network > /dev/null 2>&1; then
+            echo "✅ app-network exists"
+            CONNECTED=$(docker network inspect app-network --format '{{len .Containers}}')
+            echo "   Connected containers: $CONNECTED"
+          else
+            echo "❌ app-network does not exist"
+            exit 1
+          fi
+          echo ""
+          
+          # Check volumes
+          echo "💾 Docker Volumes:"
+          if docker volume inspect shared-postgres-data > /dev/null 2>&1; then
+            echo "✅ shared-postgres-data volume exists"
+          else
+            echo "❌ shared-postgres-data volume does not exist"
+            exit 1
+          fi
+          echo ""
+          
+          # Check SSL certificates (if they should exist)
+          echo "🔒 SSL Certificates:"
+          if [ -d "/srv/infrastructure/certs/live" ]; then
+            echo "✅ SSL certificates directory exists"
+            ls -la /srv/infrastructure/certs/live/ || true
+          else
+            echo "⚠️  SSL certificates not found (might be first deployment)"
+          fi
+          echo ""
+          
+          # Summary
+          echo "========================================"
+          echo "✅ Deployment verification completed"
+          echo "========================================"
+          echo ""
+          echo "📊 Resource Usage:"
+          docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+          echo ""
+          echo "🎉 Infrastructure is healthy!"
+
+    - name: Cleanup on failure
+      if: failure()
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SSH_KEY }}
+        script: |
+          cd /srv/infrastructure
+          echo "❌ Deployment failed. Showing logs..."
+          echo ""
+          echo "=== Docker Compose Logs ==="
+          docker-compose logs --tail=50
+          echo ""
+          echo "=== Container Status ==="
+          docker-compose ps -a
