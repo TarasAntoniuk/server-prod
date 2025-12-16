@@ -4,24 +4,17 @@ services:
     container_name: shared-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: postgres
-      # Pass credentials to init script
-      FINANCE_DB_USER: ${FINANCE_DB_USER}
-      FINANCE_DB_PASSWORD: ${FINANCE_DB_PASSWORD}
-      TIMETRACKING_DB_USER: ${TIMETRACKING_DB_USER}
-      TIMETRACKING_DB_PASSWORD: ${TIMETRACKING_DB_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"  # ← : 5433 → 5432
     volumes:
       - shared-postgres-data:/var/lib/postgresql/data
-      - ./postgres/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
-    ports:
-      # Temporary port during migration to avoid conflict
-      - "127.0.0.1:5433:5432"
+      - ./postgres/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
     networks:
       - app-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -30,22 +23,21 @@ services:
     image: nginx:alpine
     container_name: shared-nginx
     restart: unless-stopped
-    depends_on:
-      - shared-postgres
     ports:
-      # Temporary ports during migration (avoiding conflicts with existing apps)
-      - "9080:80"
-      - "9443:443"
+      - "80:80"        # ← : 9080 → 80
+      - "443:443"      # ← : 9443 → 443
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/letsencrypt:ro
-      - ./webroot:/var/www/certbot:ro
       - ./logs/nginx:/var/log/nginx
+      - ./webroot:/var/www/certbot:ro
     networks:
       - app-network
+    depends_on:
+      - shared-postgres
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health || exit 1"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -56,14 +48,11 @@ services:
     volumes:
       - ./certs:/etc/letsencrypt
       - ./webroot:/var/www/certbot
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
-    restart: unless-stopped
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew && chown -R 1000:1000 /etc/letsencrypt; sleep 12h & wait $${!}; done;'"
 
 networks:
   app-network:
     name: app-network
-    driver: bridge
 
 volumes:
   shared-postgres-data:
-    name: shared-postgres-data
